@@ -40,3 +40,19 @@ message AppendEntriesResponse {
   uint64 term = 1;
   bool success = 2;
 }
+
+message Command {
+  oneof cmd {
+    Put    put    = 1;
+    Delete delete = 2;
+  }
+}
+
+message Put {
+  bytes key   = 1;
+  bytes value = 2;
+}
+
+message Delete {
+  bytes key = 1;
+}

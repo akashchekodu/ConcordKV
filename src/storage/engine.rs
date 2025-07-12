@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::{MemTable, WriteAheadLog, Compactor, TOMBSTONE};
 use super::sstable::load_sstable;
+use crate::raft::command::Command;
 
 pub struct KVEngine {
     memtable: MemTable,
@@ -51,6 +52,12 @@ impl KVEngine {
             _compactor_handle: Some(handle),
         }
     }
+    pub fn apply_command(&self, cmd: Command) {
+        match cmd {
+        Command::Put { key, value } => { let _ = self.put(key, value); }
+        Command::Delete { key }     => { let _ = self.delete(key); }
+        }
+  }
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), std::io::Error> {
         self.wal.append(&key, &value)?;

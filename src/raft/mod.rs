@@ -3,9 +3,11 @@ use rand::Rng;
 
 pub mod command;
 pub mod server;
+pub mod append_entries;  // <<< add this
+
 
 use crate::storage::KVEngine;
-use crate::raft::command::Command;
+use crate::raft::command::Command; // ✅ FIXED: use internal Command, not raft_proto::Command
 
 pub use server::RaftGrpcServer;
 
@@ -17,8 +19,14 @@ pub enum RaftRole {
     Leader,
 }
 
-/// A single node in a Raft cluster.
-#[derive(Debug)]        // <— add this
+/// A log‐entry in Raft: keeps the term plus the actual KV command
+#[derive(Clone, Debug)]
+pub struct LogEntryWithCommand {
+    pub term: u64,
+    pub cmd: Command,
+}
+
+#[derive(Debug)]        // <-- add Debug if you want to print RaftNode
 pub struct RaftNode {
     pub id: u64,
     pub current_term: u64,
@@ -26,8 +34,15 @@ pub struct RaftNode {
     pub role: RaftRole,
     pub last_heartbeat: Instant,
     pub election_timeout: Duration,
-    pub log: Vec<Command>,
+
+    // your persistent Raft log:
+    pub log: Vec<LogEntryWithCommand>,
+
+    // indexes for commits and application to the state machine
+    pub commit_index: usize,
+    pub last_applied: usize,
 }
+
 
 impl RaftNode {
     pub fn new(id: u64) -> Self {
@@ -43,7 +58,9 @@ impl RaftNode {
             role: RaftRole::Follower,
             last_heartbeat: Instant::now(),
             election_timeout: timeout,
-            log: vec![],
+            log: Vec::new(),
+            commit_index: 0,
+            last_applied: 0,
         }
     }
 
@@ -69,7 +86,10 @@ impl RaftNode {
         }
 
         println!("[Node {}] Proposing command: {:?}", self.id, cmd);
-        self.log.push(cmd.clone());
+        self.log.push(LogEntryWithCommand {
+            term: self.current_term,
+            cmd: cmd.clone(),
+        });
         self.apply(engine, cmd);
     }
 
