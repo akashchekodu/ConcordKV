@@ -4,6 +4,8 @@ package kvstore;
 
 service KVStore {
   rpc Ping (PingRequest) returns (PingResponse);
+  rpc Put (PutRequest) returns (PutResponse);
+  rpc Get (GetRequest) returns (GetResponse);
 }
 
 message PingRequest {
@@ -12,4 +14,22 @@ message PingRequest {
 
 message PingResponse {
   string reply = 1;
+}
+
+message PutRequest {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message PutResponse {
+  bool success = 1;
+}
+
+message GetRequest {
+  bytes key = 1;
+}
+
+message GetResponse {
+  bytes value = 1;
+  bool found = 2;
 }
