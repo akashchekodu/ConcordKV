@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
-use std::path::PathBuf;
-
+use std::time::Duration;
 
 use super::{MemTable, WriteAheadLog, Compactor, TOMBSTONE};
+use super::sstable::load_sstable;
 
 pub struct KVEngine {
     memtable: MemTable,
@@ -11,7 +12,6 @@ pub struct KVEngine {
     sst_dir: PathBuf,
     _compactor_handle: Option<std::thread::JoinHandle<()>>,
 }
-
 
 impl KVEngine {
     pub fn new(wal_path: impl AsRef<std::path::Path>, sst_dir: impl Into<PathBuf>) -> Self {
@@ -35,7 +35,7 @@ impl KVEngine {
         // Start compactor thread
         let compactor = Compactor::new(sst_dir.clone());
         let handle = thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            thread::sleep(Duration::from_secs(30));
             println!("[Compactor] Running...");
             if let Err(e) = compactor.compact() {
                 eprintln!("[Compactor] Error: {}", e);
@@ -47,6 +47,7 @@ impl KVEngine {
         Self {
             memtable,
             wal,
+            sst_dir,
             _compactor_handle: Some(handle),
         }
     }
@@ -64,10 +65,70 @@ impl KVEngine {
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.memtable.get(key)
+        if let Some(value) = self.memtable.get(key) {
+            return Some(value);
+        }
+
+        // Fallback to SSTables
+        let mut sst_files = std::fs::read_dir(&self.sst_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|f| f.path())
+            .filter(|f| f.extension().map_or(false, |ext| ext == "sst"))
+            .collect::<Vec<_>>();
+
+        sst_files.sort_by(|a, b| b.cmp(a)); // Newest first
+
+        for file in sst_files {
+            if let Ok(map) = load_sstable(&file) {
+                if let Some(value) = map.get(key) {
+                    if value == TOMBSTONE {
+                        return None;
+                    }
+                    return Some(value.clone());
+                }
+            }
+        }
+
+        None
     }
 
     pub fn scan(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.memtable.scan(prefix)
+        use std::collections::BTreeMap;
+
+        // Start with MemTable results
+        let mut result_map: BTreeMap<Vec<u8>, Vec<u8>> = self.memtable.scan(prefix)
+            .into_iter()
+            .collect();
+
+        // Load from SSTables
+        let mut sst_files = std::fs::read_dir(&self.sst_dir)
+            .unwrap_or_else(|_| vec![].into_iter())
+            .filter_map(Result::ok)
+            .map(|f| f.path())
+            .filter(|f| f.extension().map_or(false, |ext| ext == "sst"))
+            .collect::<Vec<_>>();
+
+        sst_files.sort_by(|a, b| b.cmp(a)); // Newest first
+
+        for file in sst_files {
+            if let Ok(map) = super::sstable::load_sstable(&file) {
+                for (k, v) in map {
+                    if !k.starts_with(prefix) {
+                        continue;
+                    }
+                    if result_map.contains_key(&k) {
+                        continue; // MemTable takes priority
+                    }
+                    if v == TOMBSTONE {
+                        continue; // Deleted
+                    }
+                    result_map.insert(k, v);
+                }
+            }
+        }
+
+        result_map.into_iter().collect()
     }
+
 }
