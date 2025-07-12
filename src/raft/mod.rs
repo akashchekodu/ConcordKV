@@ -1,10 +1,15 @@
 use std::time::{Duration, Instant};
 use rand::Rng;
+
 pub mod command;
-use crate::raft::command::Command;
+pub mod server;
+
 use crate::storage::KVEngine;
+use crate::raft::command::Command;
 
+pub use server::RaftGrpcServer;
 
+/// Node role in the Raft protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaftRole {
     Follower,
@@ -12,6 +17,8 @@ pub enum RaftRole {
     Leader,
 }
 
+/// A single node in a Raft cluster.
+#[derive(Debug)]        // <— add this
 pub struct RaftNode {
     pub id: u64,
     pub current_term: u64,
@@ -19,9 +26,8 @@ pub struct RaftNode {
     pub role: RaftRole,
     pub last_heartbeat: Instant,
     pub election_timeout: Duration,
-    pub log: Vec<Command>,  // <--- ADD THIS
+    pub log: Vec<Command>,
 }
-
 
 impl RaftNode {
     pub fn new(id: u64) -> Self {
@@ -37,7 +43,7 @@ impl RaftNode {
             role: RaftRole::Follower,
             last_heartbeat: Instant::now(),
             election_timeout: timeout,
-            log: vec![],  // <-- Initialize empty log
+            log: vec![],
         }
     }
 
@@ -63,11 +69,9 @@ impl RaftNode {
         }
 
         println!("[Node {}] Proposing command: {:?}", self.id, cmd);
-
-        self.log.push(cmd.clone());      // Simulate append to replicated log
-        self.apply(engine, cmd);         // Immediately apply (later we'll wait for quorum)
+        self.log.push(cmd.clone());
+        self.apply(engine, cmd);
     }
-
 
     pub fn become_candidate(&mut self) {
         self.role = RaftRole::Candidate;
@@ -82,8 +86,16 @@ impl RaftNode {
         println!("[Node {}] Became LEADER in term {}", self.id, self.current_term);
     }
 
+    pub fn become_follower(&mut self, term: u64) {
+        self.role = RaftRole::Follower;
+        self.current_term = term;
+        self.voted_for = None;
+        self.last_heartbeat = Instant::now();
+        println!("[Node {}] Became FOLLOWER in term {}", self.id, self.current_term);
+    }
+
     pub fn send_vote_requests(&mut self, peers: &mut [RaftNode]) {
-        let mut votes = 1; // Vote for self
+        let mut votes = 1; // vote for self
 
         for peer in peers.iter_mut().filter(|p| p.id != self.id) {
             if peer.handle_vote_request(self.current_term, self.id) {
@@ -105,41 +117,6 @@ impl RaftNode {
         println!("[Node {}] Sent heartbeats", self.id);
     }
 
-
-    pub fn become_follower(&mut self, term: u64) {
-        self.role = RaftRole::Follower;
-        self.current_term = term;
-        self.voted_for = None;
-        self.last_heartbeat = Instant::now();
-        println!("[Node {}] Became FOLLOWER in term {}", self.id, self.current_term);
-    }
-
-    pub fn tick(&mut self, peers: &mut [RaftNode]) {
-        if !self.is_election_timeout() {
-            return;
-        }
-
-        match self.role {
-            RaftRole::Follower => {
-                // First timeout: become candidate, but don't dispatch RPCs yet
-                self.become_candidate();
-            }
-
-            RaftRole::Candidate => {
-                // Subsequent timeout as candidate: start a fresh election
-                self.become_candidate();           // bump term + vote for self
-                self.send_vote_requests(peers);    // collect votes
-            }
-
-            RaftRole::Leader => {
-                // Leader heartbeat timeout: proactively ping followers
-                self.send_heartbeats(peers);
-            }
-        }
-    }
-
-
-
     pub fn handle_vote_request(&mut self, term: u64, candidate_id: u64) -> bool {
         if term < self.current_term {
             return false;
@@ -157,11 +134,23 @@ impl RaftNode {
         }
     }
 
-    /// Starts election and collects votes
+    pub fn handle_heartbeat(&mut self, term: u64, leader_id: u64) {
+        if term < self.current_term {
+            return;
+        }
+
+        if term > self.current_term || self.role != RaftRole::Follower {
+            self.become_follower(term);
+        }
+
+        self.last_heartbeat = Instant::now();
+        println!("[Node {}] Received heartbeat from leader {}", self.id, leader_id);
+    }
+
     pub fn start_election(&mut self, peers: &mut [RaftNode]) {
         self.become_candidate();
 
-        let mut votes = 1; // vote for self
+        let mut votes = 1;
         for peer in peers.iter_mut() {
             if peer.id == self.id {
                 continue;
@@ -179,20 +168,22 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_heartbeat(&mut self, term: u64, leader_id: u64) {
-        if term < self.current_term {
+    pub fn tick(&mut self, peers: &mut [RaftNode]) {
+        if !self.is_election_timeout() {
             return;
         }
 
-        if term > self.current_term || self.role != RaftRole::Follower {
-            self.become_follower(term);
+        match self.role {
+            RaftRole::Follower => self.become_candidate(),
+            RaftRole::Candidate => {
+                self.become_candidate();
+                self.send_vote_requests(peers);
+            }
+            RaftRole::Leader => self.send_heartbeats(peers),
         }
-
-        self.last_heartbeat = Instant::now();
-        println!("[Node {}] Received heartbeat from leader {}", self.id, leader_id);
     }
-
 }
+
 
 #[cfg(test)]
 mod tests {

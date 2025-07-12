@@ -2,26 +2,31 @@ syntax = "proto3";
 
 package raft;
 
+// === Service ===
 service Raft {
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
 }
 
+// === RequestVote ===
 message RequestVoteRequest {
   uint64 term = 1;
   uint64 candidate_id = 2;
 }
 
+// === RequestVote Response ===
 message RequestVoteResponse {
   uint64 term = 1;
   bool vote_granted = 2;
 }
 
+// === Log Entry ===
 message LogEntry {
   uint64 term = 1;
-  bytes command = 2; // our KV operations later
+  bytes command = 2; // KV command (serialized)
 }
 
+// === AppendEntries RPC ===
 message AppendEntriesRequest {
   uint64 term = 1;
   uint64 leader_id = 2;

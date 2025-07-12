@@ -1,16 +1,31 @@
+// /src/lib.rs
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
-pub mod raft;         // ✅ Add this at top-level
-pub mod storage;
-use storage::engine::KVEngine;
-use std::sync::Arc;
 
+// These constants pull in the compiled descriptor sets from OUT_DIR:
+const RAFT_DESCRIPTOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/raft_descriptor.bin"));
+const KVSTORE_DESCRIPTOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kvstore_descriptor.bin"));
 
 pub mod kvstore {
     tonic::include_proto!("kvstore");
-    pub const FILE_DESCRIPTOR_SET: &[u8] =
-        tonic::include_file_descriptor_set!("kvstore_descriptor");
 }
+
+pub mod raft_proto {
+    tonic::include_proto!("raft");
+}
+pub mod raft;   // your Raft logic and gRPC server stub
+pub mod storage;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use storage::engine::KVEngine;
+use raft::RaftNode;
+use raft::server::RaftGrpcServer;
+
+
+// kvstore protobuf
+
 
 use kvstore::kv_store_server::{KvStore, KvStoreServer};
 use kvstore::{
@@ -20,6 +35,9 @@ use kvstore::{
     DeleteRequest, DeleteResponse,
     ScanRequest, ScanResponse, KeyValue,
 };
+
+// Bring in the generated Raft gRPC types from the .proto
+
 
 #[derive(Clone)]
 pub struct KvStoreService {
@@ -78,18 +96,32 @@ impl KvStore for KvStoreService {
 
 pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:50051".parse()?;
-    let service = KvStoreService::new("wal.log");
 
-    println!("KVStoreServer listening on {}", addr);
+        // Spin up your KV engine and Raft node:
+    let engine = Arc::new(KVEngine::new("wal.log", "sstables"));
+    let raft_node = Arc::new(Mutex::new(RaftNode::new_with_timeout(1, Duration::from_millis(300))));
+
+    let kv_service = KvStoreService { engine: Arc::clone(&engine) };
+
+    // now this matches our updated constructor
+    let raft_service = RaftGrpcServer::new(
+        Arc::clone(&raft_node),
+        Arc::clone(&engine),
+    );
+
+
+    // Build the reflection service using the two descriptor blobs:
     let reflection = ReflectionBuilder::configure()
-        .register_encoded_file_descriptor_set(kvstore::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(RAFT_DESCRIPTOR)
+        .register_encoded_file_descriptor_set(KVSTORE_DESCRIPTOR)
         .build()?;
 
+    println!("Server listening on {}", addr);
     Server::builder()
-        .add_service(KvStoreServer::new(service))
-        .add_service(reflection)
-        .serve(addr)
-        .await?;
-
+    .add_service(KvStoreServer::new(kv_service))
+    .add_service(raft_proto::raft_server::RaftServer::new(raft_service))
+    .add_service(reflection)
+    .serve(addr)
+    .await?;
     Ok(())
 }
