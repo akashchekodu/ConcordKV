@@ -97,17 +97,20 @@ impl KVEngine {
         use std::collections::BTreeMap;
 
         // Start with MemTable results
-        let mut result_map: BTreeMap<Vec<u8>, Vec<u8>> = self.memtable.scan(prefix)
+        let mut result_map: BTreeMap<Vec<u8>, Vec<u8>> = self.memtable
+            .scan(prefix)
             .into_iter()
             .collect();
 
-        // Load from SSTables
-        let mut sst_files = std::fs::read_dir(&self.sst_dir)
-            .unwrap_or_else(|_| vec![].into_iter())
-            .filter_map(Result::ok)
-            .map(|f| f.path())
-            .filter(|f| f.extension().map_or(false, |ext| ext == "sst"))
-            .collect::<Vec<_>>();
+        // Safely list SST files
+        let mut sst_files = match std::fs::read_dir(&self.sst_dir) {
+            Ok(files) => files
+                .filter_map(Result::ok)
+                .map(|f| f.path())
+                .filter(|f| f.extension().map_or(false, |ext| ext == "sst"))
+                .collect::<Vec<_>>(),
+            Err(_) => vec![],
+        };
 
         sst_files.sort_by(|a, b| b.cmp(a)); // Newest first
 
@@ -131,4 +134,70 @@ impl KVEngine {
         result_map.into_iter().collect()
     }
 
+
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_put_get_delete() {
+        let dir = tempdir().unwrap();
+        let engine = KVEngine::new(dir.path().join("wal.log"), dir.path());
+
+        engine.put(b"apple".to_vec(), b"red".to_vec()).unwrap();
+        assert_eq!(engine.get(b"apple"), Some(b"red".to_vec()));
+
+        engine.delete(b"apple".to_vec()).unwrap();
+        assert_eq!(engine.get(b"apple"), None);
+    }
+
+    #[test]
+    fn test_flush_and_fallback_sstable() {
+        let dir = tempdir().unwrap();
+        let engine = KVEngine::new(dir.path().join("wal.log"), dir.path());
+
+        for i in 0..1000 {
+            engine.put(format!("key{i}").into_bytes(), format!("val{i}").into_bytes()).unwrap();
+        }
+
+        // Force flush to SSTable
+        engine.memtable.flush().unwrap();
+
+        // Verify fallback read from SSTable
+        assert_eq!(engine.get(b"key500"), Some(b"val500".to_vec()));
+    }
+
+    #[test]
+    fn test_wal_recovery() {
+        let dir = tempdir().unwrap();
+        {
+            let engine = KVEngine::new(dir.path().join("wal.log"), dir.path());
+            engine.put(b"k1".to_vec(), b"v1".to_vec()).unwrap();
+        }
+
+        // Reconstruct engine to simulate restart
+        let recovered = KVEngine::new(dir.path().join("wal.log"), dir.path());
+        assert_eq!(recovered.get(b"k1"), Some(b"v1".to_vec()));
+    }
+
+    #[test]
+    fn test_scan() {
+        let dir = tempdir().unwrap();
+        let engine = KVEngine::new(dir.path().join("wal.log"), dir.path());
+
+        engine.put(b"cat:1".to_vec(), b"black".to_vec()).unwrap();
+        engine.put(b"cat:2".to_vec(), b"white".to_vec()).unwrap();
+        engine.put(b"dog:1".to_vec(), b"brown".to_vec()).unwrap();
+
+        let result = engine.scan(b"cat:");
+        assert_eq!(result.len(), 2);
+
+        let keys: Vec<_> = result.into_iter().map(|(k, _)| k).collect();
+        assert!(keys.contains(&b"cat:1".to_vec()));
+        assert!(keys.contains(&b"cat:2".to_vec()));
+    }
 }

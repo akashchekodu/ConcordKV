@@ -1,7 +1,7 @@
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
-
-mod storage;
+pub mod raft;         // ✅ Add this at top-level
+pub mod storage;
 use storage::engine::KVEngine;
 use std::sync::Arc;
 

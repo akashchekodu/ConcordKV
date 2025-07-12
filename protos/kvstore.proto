@@ -2,7 +2,6 @@ syntax = "proto3";
 
 package kvstore;
 
-// ✅ Make sure this matches exactly in grpcurl: "kvstore.KVStore"
 service KVStore {
   rpc Ping(PingRequest) returns (PingResponse);
   rpc Put(PutRequest) returns (PutResponse);
