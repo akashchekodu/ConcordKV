@@ -2,10 +2,13 @@ syntax = "proto3";
 
 package kvstore;
 
+// ✅ Make sure this matches exactly in grpcurl: "kvstore.KVStore"
 service KVStore {
   rpc Ping(PingRequest) returns (PingResponse);
   rpc Put(PutRequest) returns (PutResponse);
   rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Scan(ScanRequest) returns (ScanResponse);
 }
 
 message PingRequest {
@@ -32,4 +35,25 @@ message GetRequest {
 message GetResponse {
   bytes value = 1;
   bool found = 2;
+}
+
+message DeleteRequest {
+  bytes key = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+}
+
+message ScanRequest {
+  bytes prefix = 1;
+}
+
+message ScanResponse {
+  repeated KeyValue pairs = 1;
+}
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;
 }

@@ -1,21 +1,13 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 pub mod wal;
+pub mod sstable;
+pub mod memtable;
+pub mod compactor; // ✅ Declare the compactor module
+pub mod engine;
+
+
+// Re-exports
 pub use wal::WriteAheadLog;
-
-#[derive(Clone, Default)]
-pub struct MemTable {
-    inner: Arc<Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
-}
-
-impl MemTable {
-    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
-        let mut map = self.inner.lock().unwrap();
-        map.insert(key, value);
-    }
-
-    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let map = self.inner.lock().unwrap();
-        map.get(key).cloned()
-    }
-}
+pub use memtable::MemTable;
+pub use sstable::{flush_to_sstable, load_sstable};
+pub use compactor::Compactor; // ✅ Optional: re-export if needed in lib.rs
+pub use self::memtable::TOMBSTONE; // ✅ Add this line
