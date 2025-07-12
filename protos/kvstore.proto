@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package kvstore;
+
+service KVStore {
+  rpc Ping (PingRequest) returns (PingResponse);
+}
+
+message PingRequest {
+  string message = 1;
+}
+
+message PingResponse {
+  string reply = 1;
+}
