@@ -3,9 +3,9 @@ syntax = "proto3";
 package kvstore;
 
 service KVStore {
-  rpc Ping (PingRequest) returns (PingResponse);
-  rpc Put (PutRequest) returns (PutResponse);
-  rpc Get (GetRequest) returns (GetResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
 }
 
 message PingRequest {

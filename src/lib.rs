@@ -1,33 +1,44 @@
 use tonic::{transport::Server, Request, Response, Status};
-use tonic_reflection::server::Builder as ReflectionBuilder;
 mod storage;
-use storage::MemTable;
-use kvstore::{PingRequest, PingResponse, PutRequest, PutResponse, GetRequest, GetResponse};
-
+use tonic_reflection::server::Builder as ReflectionBuilder;
 
 pub mod kvstore {
     tonic::include_proto!("kvstore");
-
+    // Pull in the file the build script just generated:
     pub const FILE_DESCRIPTOR_SET: &[u8] =
         tonic::include_file_descriptor_set!("kvstore_descriptor");
 }
 
 
 use kvstore::kv_store_server::{KvStore, KvStoreServer};
-use kvstore::{PingRequest, PingResponse};
+use kvstore::{PingRequest, PingResponse, PutRequest, PutResponse, GetRequest, GetResponse};
+
+use storage::{MemTable, WriteAheadLog};
 
 #[derive(Clone)]
 pub struct KvStoreService {
     memtable: MemTable,
+    wal: WriteAheadLog,
 }
 
 impl KvStoreService {
-    pub fn new() -> Self {
-        Self {
-            memtable: MemTable::default(),
-        }
+    pub fn new(log_path: impl AsRef<std::path::Path>) -> Self {
+        // 1) Open or create the WAL
+        let wal = WriteAheadLog::new(log_path.as_ref()).expect("failed to open WAL");
+        // 2) Rebuild in-memory state from existing log
+        let memtable = {
+            let mut m = MemTable::default();
+            if let Ok(entries) = WriteAheadLog::replay(log_path.as_ref()) {
+                for (k, v) in entries {
+                    m.put(k, v);
+                }
+            }
+            m
+        };
+        Self { memtable, wal }
     }
 }
+
 
 #[tonic::async_trait]
 impl KvStore for KvStoreService {
@@ -39,10 +50,19 @@ impl KvStore for KvStoreService {
     }
 
     async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
-        let req = request.into_inner();
-        self.memtable.put(req.key, req.value);
+        let PutRequest { key, value, .. } = request.into_inner();
+
+        // 1) Persist to WAL
+        self.wal
+            .append(&key, &value)
+            .map_err(|e| Status::internal(format!("WAL error: {}", e)))?;
+        // 2) Then update in-memory state
+        self.memtable.put(key.clone(), value.clone());
+
         Ok(Response::new(PutResponse { success: true }))
     }
+
+
 
     async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         let key = request.into_inner().key;
@@ -61,21 +81,21 @@ impl KvStore for KvStoreService {
 
 
 pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "0.0.0.0:50051".parse()?; // IPv4
-    let service = KvStoreService::new();
+    let addr = "0.0.0.0:50051".parse()?; // gRPC server address
+
+    let service = KvStoreService::new("wal.log"); // ⬅️ pass log path, not WriteAheadLog directly
 
     println!("KVStoreServer listening on {}", addr);
+
     let reflection = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(kvstore::FILE_DESCRIPTOR_SET)
-        .build()
-        .unwrap();
+        .build()?;
 
     Server::builder()
         .add_service(KvStoreServer::new(service))
-        .add_service(reflection) // 👈 Add this line
+        .add_service(reflection)
         .serve(addr)
         .await?;
-
 
     Ok(())
 }

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+pub mod wal;
+pub use wal::WriteAheadLog;
 
 #[derive(Clone, Default)]
 pub struct MemTable {
