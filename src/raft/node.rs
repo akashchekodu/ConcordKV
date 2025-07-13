@@ -1,9 +1,13 @@
-use std::time::{Duration, Instant};
 use rand::Rng;
 use std::collections::HashMap;
 use tonic::Request;
-use std::sync::Arc;
 use futures::future::join_all;
+use std::sync::{Arc, Mutex};
+// Prefer standard Duration by default (used in most structs and timers)
+use std::time::{Duration as StdDuration, Instant};
+
+// Then, for tokio-specific interval timers:
+use tokio::time::{interval, Duration as TokioDuration};
 
 use crate::storage::KVEngine;
 use crate::raft::command::Command;
@@ -28,7 +32,7 @@ pub struct RaftNode {
     pub voted_for: Option<u64>,
     pub role: RaftRole,
     pub last_heartbeat: Instant,
-    pub election_timeout: Duration,
+    pub election_timeout: StdDuration,
     pub log: Vec<LogEntryWithCommand>,
     pub commit_index: usize,
     pub last_applied: usize,
@@ -43,7 +47,7 @@ impl RaftNode {
     pub async fn with_peers(
         id: u64,
         peer_addresses: &HashMap<u64, String>,
-        timeout: Duration,
+        timeout: StdDuration,
         engine: Arc<KVEngine>
     ) -> Self {
         let mut node = Self {
@@ -81,12 +85,12 @@ impl RaftNode {
     }
 
     pub fn new(id: u64, engine: Arc<KVEngine>) -> Self {
-        let timeout = Duration::from_millis(rand::thread_rng().gen_range(150..300));
+        let timeout = StdDuration::from_millis(rand::thread_rng().gen_range(150..300));
         Self::new_with_timeout(id, timeout, engine)
     }
 
 
-    pub fn new_with_timeout(id: u64, timeout: Duration,engine: Arc<KVEngine>) -> Self {
+    pub fn new_with_timeout(id: u64, timeout: StdDuration,engine: Arc<KVEngine>) -> Self {
         Self {
             id,
             current_term: 0,
@@ -477,6 +481,19 @@ impl RaftNode {
         }
     }
 
+    pub fn check_election_timeout_and_maybe_become_candidate(&mut self) {
+        if self.is_election_timeout() {
+            println!("[Node {}] Election timeout. Becoming candidate...", self.id);
+            self.start_election();
+        }
+    }
+
+    pub fn check_election_timeout_and_maybe_restart_election(&mut self) {
+        if self.is_election_timeout() {
+            println!("[Node {}] Election timeout (as candidate). Restarting election...");
+            self.start_election();
+        }
+    }
 
     pub async fn start_election(&mut self) {
         self.become_candidate();
@@ -578,6 +595,31 @@ impl RaftNode {
 }
 
 
+pub async fn start_raft_main_loop(node: Arc<Mutex<RaftNode>>) {
+    let mut ticker = interval(TokioDuration::from_millis(100));
+
+    loop {
+        ticker.tick().await;
+
+        let mut node = node.lock().unwrap();
+        node.tick(&mut peers);
+
+        match node.role {
+            RaftRole::Leader => {
+                node.send_append_entries_to_peers();
+            }
+            RaftRole::Candidate => {
+                node.check_election_timeout_and_maybe_restart_election();
+            }
+            RaftRole::Follower => {
+                node.check_election_timeout_and_maybe_become_candidate();
+            }
+        }
+    }
+}
+
+
+
 fn test_engine() -> Arc<KVEngine> {
     Arc::new(KVEngine::new("test_wal.log", "test_sstables"))
 }
@@ -594,8 +636,8 @@ mod tests {
 
     #[test]
     fn test_election_timeout_triggers_candidate() {
-        let mut node = RaftNode::new_with_timeout(1, Duration::from_millis(100), test_engine());
-        sleep(Duration::from_millis(200));
+        let mut node = RaftNode::new_with_timeout(1, StdDuration::from_millis(100), test_engine());
+        sleep(StdDuration::from_millis(200));
         assert!(node.is_election_timeout());
 
         node.become_candidate();
@@ -604,8 +646,8 @@ mod tests {
 
     #[test]
     fn test_tick_promotes_to_candidate_after_timeout() {
-        let mut nodes = vec![RaftNode::new_with_timeout(1, Duration::from_millis(100), test_engine())];
-        std::thread::sleep(Duration::from_millis(200));
+        let mut nodes = vec![RaftNode::new_with_timeout(1, StdDuration::from_millis(100), test_engine())];
+        std::thread::sleep(StdDuration::from_millis(200));
 
         let (first, rest) = nodes.split_at_mut(1);
         first[0].tick(rest);
@@ -615,7 +657,7 @@ mod tests {
     #[test]
     fn test_candidate_wins_election_with_majority_votes() {
         let mut nodes: Vec<RaftNode> = (1..=5)
-            .map(|id| RaftNode::new_with_timeout(id, Duration::from_millis(300), test_engine()))
+            .map(|id| RaftNode::new_with_timeout(id, StdDuration::from_millis(300), test_engine()))
             .collect();
 
         let (self_node, peers) = nodes.split_first_mut().unwrap();
@@ -626,14 +668,14 @@ mod tests {
     #[test]
 fn test_leader_sends_heartbeats_to_followers() {
     let mut nodes: Vec<RaftNode> = (1..=3)
-        .map(|id| RaftNode::new_with_timeout(id, Duration::from_millis(300), test_engine()))
+        .map(|id| RaftNode::new_with_timeout(id, StdDuration::from_millis(300), test_engine()))
         .collect();
 
     let (leader, peers) = nodes.split_first_mut().unwrap();
     leader.become_leader();
 
     for peer in peers.iter_mut() {
-        peer.last_heartbeat = Instant::now() - Duration::from_millis(500);
+        peer.last_heartbeat = Instant::now() - StdDuration::from_millis(500);
     }
 
     leader.simulate_send_heartbeats(peers); // ✅ simulation version
@@ -648,7 +690,7 @@ fn test_leader_sends_heartbeats_to_followers() {
     #[test]
     fn test_candidate_retries_election_on_timeout() {
         let mut nodes: Vec<RaftNode> = (1..=3)
-            .map(|id| RaftNode::new_with_timeout(id, Duration::from_millis(200), test_engine()))
+            .map(|id| RaftNode::new_with_timeout(id, StdDuration::from_millis(200), test_engine()))
             .collect();
 
         let (node, peers) = nodes.split_first_mut().unwrap();
@@ -671,7 +713,7 @@ fn test_leader_sends_heartbeats_to_followers() {
 
     #[test]
     fn test_handle_vote_request_refuses_second_different_candidate() {
-        let mut node = RaftNode::new_with_timeout(1, Duration::from_millis(100), test_engine());
+        let mut node = RaftNode::new_with_timeout(1, StdDuration::from_millis(100), test_engine());
         assert!(node.handle_vote_request(1, 42));
         assert!(!node.handle_vote_request(1, 17));
         assert_eq!(node.voted_for, Some(42));
@@ -679,7 +721,7 @@ fn test_leader_sends_heartbeats_to_followers() {
 
     #[test]
     fn test_handle_vote_request_honours_higher_term() {
-        let mut node = RaftNode::new_with_timeout(1, Duration::from_millis(100), test_engine());
+        let mut node = RaftNode::new_with_timeout(1, StdDuration::from_millis(100), test_engine());
         node.become_candidate();
         assert!(node.handle_vote_request(2, 99));
         assert_eq!(node.role, RaftRole::Follower);
@@ -689,7 +731,7 @@ fn test_leader_sends_heartbeats_to_followers() {
 
     #[test]
     fn test_handle_heartbeat_ignores_older_term() {
-        let mut node = RaftNode::new_with_timeout(1, Duration::from_millis(100), test_engine());
+        let mut node = RaftNode::new_with_timeout(1, StdDuration::from_millis(100), test_engine());
         node.become_candidate();
         let old_term = node.current_term;
         node.handle_heartbeat(0, 5);
@@ -699,7 +741,7 @@ fn test_leader_sends_heartbeats_to_followers() {
 
     #[test]
     fn test_handle_heartbeat_promotes_to_follower_on_term_advance() {
-        let mut node = RaftNode::new_with_timeout(1, Duration::from_millis(100), test_engine());
+        let mut node = RaftNode::new_with_timeout(1, StdDuration::from_millis(100), test_engine());
         node.become_candidate();
         node.handle_heartbeat(2, 5);
         assert_eq!(node.role, RaftRole::Follower);
