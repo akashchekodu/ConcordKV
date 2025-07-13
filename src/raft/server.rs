@@ -46,18 +46,6 @@ impl RaftGrpcServer {
 
 #[tonic::async_trait]
 impl Raft for RaftGrpcServer {
-    async fn request_vote(
-        &self,
-        request: Request<RequestVoteRequest>,
-    ) -> Result<Response<RequestVoteResponse>, Status> {
-        let req = request.into_inner();
-        let mut n = self.node.lock().unwrap();
-        let vote = n.handle_vote_request(req.term, req.candidate_id);
-        Ok(Response::new(RequestVoteResponse {
-            term: n.current_term,
-            vote_granted: vote,
-        }))
-    }
 
     async fn append_entries(
         &self,
@@ -66,7 +54,7 @@ impl Raft for RaftGrpcServer {
         let req = request.into_inner();
         let mut node = self.node.lock().unwrap();
 
-        // 🧠 Step 1: Reject if term is stale
+        // Step 1: stale-term check
         if req.term < node.current_term {
             return Ok(Response::new(AppendEntriesResponse {
                 term: node.current_term,
@@ -74,12 +62,12 @@ impl Raft for RaftGrpcServer {
             }));
         }
 
-        // 🧠 Step 2: Step down if term is newer
+        // Step 2: step down on higher term
         if req.term > node.current_term {
             node.become_follower(req.term);
         }
 
-        // 🧠 Step 3: Check log consistency with prev_log_index & prev_log_term
+        // Step 3: consistency check
         let prev_index = req.prev_log_index as usize;
         let prev_ok = if prev_index == 0 {
             true
@@ -88,7 +76,6 @@ impl Raft for RaftGrpcServer {
         } else {
             false
         };
-
         if !prev_ok {
             return Ok(Response::new(AppendEntriesResponse {
                 term: node.current_term,
@@ -96,37 +83,36 @@ impl Raft for RaftGrpcServer {
             }));
         }
 
-        // 🧠 Step 4: Append new entries (resolving conflicts)
-        let mut index = prev_index + 1;
-
-        for entry in req.entries {
-            if index < node.log.len() {
-                // Conflict? Overwrite if term mismatches
-                if node.log[index].term != entry.term {
-                    node.log.truncate(index);
+        // Step 4: conflict detection & overwrite
+        let start = prev_index + 1;
+        let mut conflict_at = start;
+        for (i, ent) in req.entries.iter().enumerate() {
+            let idx = start + i;
+            if let Some(existing) = node.log.get(idx) {
+                if existing.term != ent.term {
+                    break;
                 }
+                conflict_at += 1;
+            } else {
+                break;
             }
+        }
+        node.log.truncate(conflict_at);
 
-            if index >= node.log.len() {
-                // Decode command
-                let proto = Command::decode(&*entry.command)
-                    .map_err(|e| Status::internal(format!("Failed to decode command: {}", e)))?;
-
-                let cmd = InternalCommand::from_proto(proto);
-
-                node.log.push(LogEntryWithCommand {
-                    term: entry.term,
-                    cmd,
-                });
-            }
-
-            index += 1;
+        // Step 5: append new entries beyond conflict point
+        for ent in &req.entries[(conflict_at - start)..] {
+            let proto = Command::decode(&*ent.command)
+                .map_err(|e| Status::internal(format!("decode error: {}", e)))?;
+            let cmd = InternalCommand::from_proto(proto);
+            node.log.push(LogEntryWithCommand {
+                term: ent.term,
+                cmd,
+            });
         }
 
-        // 🧠 Step 5: Advance commit index and apply to state machine
+        // Step 6: advance commit index & apply
         let leader_commit = req.leader_commit as usize;
         let new_commit = std::cmp::min(leader_commit, node.log.len().saturating_sub(1));
-
         if new_commit > node.commit_index {
             for i in (node.commit_index + 1)..=new_commit {
                 let entry = &node.log[i];
@@ -138,6 +124,35 @@ impl Raft for RaftGrpcServer {
         Ok(Response::new(AppendEntriesResponse {
             term: node.current_term,
             success: true,
+        }))
+    }
+
+    async fn request_vote(
+        &self,
+        request: Request<RequestVoteRequest>,
+    ) -> Result<Response<RequestVoteResponse>, Status> {
+        let req = request.into_inner();
+        let mut node = self.node.lock().unwrap();
+
+        if req.term < node.current_term {
+            return Ok(Response::new(RequestVoteResponse {
+                term: node.current_term,
+                vote_granted: false,
+            }));
+        }
+
+        if req.term > node.current_term {
+            node.become_follower(req.term);
+        }
+
+        let vote_granted = node.voted_for.is_none() || node.voted_for == Some(req.candidate_id);
+        if vote_granted {
+            node.voted_for = Some(req.candidate_id);
+        }
+
+        Ok(Response::new(RequestVoteResponse {
+            term: node.current_term,
+            vote_granted,
         }))
     }
 }

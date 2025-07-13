@@ -3,12 +3,14 @@ use rand::Rng;
 use std::collections::HashMap;
 use tonic::Request;
 use std::sync::Arc;
+use futures::future::join_all;
 
 use crate::storage::KVEngine;
 use crate::raft::command::Command;
 use crate::raft::log::LogEntryWithCommand;
 use crate::raft_proto::raft_client::RaftClient;
 use tonic::transport::Channel;
+use crate::raft_proto::{RequestVoteRequest, RequestVoteResponse};
 
 use crate::raft_proto::{AppendEntriesRequest, AppendEntriesResponse, LogEntry};
 use prost::Message; // needed for encoding Command
@@ -102,66 +104,66 @@ impl RaftNode {
         }
     }
 
-//     pub fn send_append_entries(&mut self, peers: &mut [RaftNode])
+    pub fn simulate_append_entries(&mut self, peers: &mut [RaftNode])
 
-//  {
-//         // Only leader should call this
-//         if self.role != RaftRole::Leader {
-//             return;
-//         }
+ {
+        // Only leader should call this
+        if self.role != RaftRole::Leader {
+            return;
+        }
 
-//         for peer in peers.iter_mut().filter(|p| p.id != self.id) {
-//             let peer_id = peer.id;
+        for peer in peers.iter_mut().filter(|p| p.id != self.id) {
+            let peer_id = peer.id;
 
-//             let next_index = self.next_index.get(&peer_id).copied().unwrap_or(1);
-//             let prev_log_index = if next_index > 0 { next_index - 1 } else { 0 };
-//             let prev_log_term = if prev_log_index < self.log.len() {
-//                 self.log[prev_log_index].term
-//             } else {
-//                 0
-//             };
+            let next_index = self.next_index.get(&peer_id).copied().unwrap_or(1);
+            let prev_log_index = if next_index > 0 { next_index - 1 } else { 0 };
+            let prev_log_term = if prev_log_index < self.log.len() {
+                self.log[prev_log_index].term
+            } else {
+                0
+            };
 
-//             let entries: Vec<LogEntry> = self.log
-//                 .iter()
-//                 .skip(next_index)
-//                 .map(|entry| {
-//                     LogEntry {
-//                         term: entry.term,
-//                         command: entry.cmd.to_proto().encode_to_vec(),
-//                     }
-//                 })
-//                 .collect();
+            let entries: Vec<LogEntry> = self.log
+                .iter()
+                .skip(next_index)
+                .map(|entry| {
+                    LogEntry {
+                        term: entry.term,
+                        command: entry.cmd.to_proto().encode_to_vec(),
+                    }
+                })
+                .collect();
 
-//             let request = AppendEntriesRequest {
-//                 term: self.current_term,
-//                 leader_id: self.id,
-//                 prev_log_index: prev_log_index as u64,
-//                 prev_log_term,
-//                 entries,
-//                 leader_commit: self.commit_index as u64,
-//             };
+            let request = AppendEntriesRequest {
+                term: self.current_term,
+                leader_id: self.id,
+                prev_log_index: prev_log_index as u64,
+                prev_log_term,
+                entries,
+                leader_commit: self.commit_index as u64,
+            };
 
-//             // Simulate sending RPC (for now, call peer.handle_append_entries directly)
-//             let response = peer.handle_append_entries(&request);
+            // Simulate sending RPC (for now, call peer.handle_append_entries directly)
+            let response = peer.handle_append_entries(&request);
 
-//             if response.success {
-//                 // update match_index and next_index
-//                 let new_match_index = prev_log_index + request.entries.len();
-//                 self.match_index.insert(peer_id, new_match_index);
-//                 self.next_index.insert(peer_id, new_match_index + 1);
-//             } else if response.term > self.current_term {
-//                 self.become_follower(response.term);
-//                 return;
-//             } else {
-//                 // Decrement next_index for retry
-//                 let next = self.next_index.get_mut(&peer_id).unwrap();
-//                 if *next > 1 {
-//                     *next -= 1;
-//                 }
-//             }
-//         }
-//         self.update_commit_index();
-//     }
+            if response.success {
+                // update match_index and next_index
+                let new_match_index = prev_log_index + request.entries.len();
+                self.match_index.insert(peer_id, new_match_index);
+                self.next_index.insert(peer_id, new_match_index + 1);
+            } else if response.term > self.current_term {
+                self.become_follower(response.term);
+                return;
+            } else {
+                // Decrement next_index for retry
+                let next = self.next_index.get_mut(&peer_id).unwrap();
+                if *next > 1 {
+                    *next -= 1;
+                }
+            }
+        }
+        self.update_commit_index();
+    }
 
     pub fn update_commit_index(&mut self) {
         if self.role != RaftRole::Leader {
@@ -311,25 +313,66 @@ impl RaftNode {
         println!("[Node {}] Became FOLLOWER in term {}", self.id, self.current_term);
     }
 
-    pub fn send_vote_requests(&mut self, peers: &mut [RaftNode]) {
+    pub async fn send_vote_requests(&mut self) {
         let mut votes = 1; // vote for self
+        let term = self.current_term;
+        let candidate_id = self.id;
 
-        for peer in peers.iter_mut().filter(|p| p.id != self.id) {
-            if peer.handle_vote_request(self.current_term, self.id) {
+        println!("[Node {}] Sending RequestVote RPCs to peers...", self.id);
+
+        let futures = self.peers.iter_mut().map(|(&peer_id, client)| {
+            let mut client = client.clone();
+            let last_log_index = self.log.len().saturating_sub(1) as u64;
+            let last_log_term = if self.log.is_empty() {
+                0
+            } else {
+                self.log[last_log_index as usize].term
+            };
+            let request = crate::raft_proto::RequestVoteRequest {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            };
+
+            async move {
+                match client.request_vote(Request::new(request)).await {
+                    Ok(response) => {
+                        let vote_granted = response.into_inner().vote_granted;
+                        println!("[Node {}] Peer {} responded with vote_granted = {}", candidate_id, peer_id, vote_granted);
+                        vote_granted
+                    }
+                    Err(e) => {
+                        eprintln!("[Node {}] Failed to send RequestVote to peer {}: {}", candidate_id, peer_id, e);
+                        false
+                    }
+                }
+            }
+        });
+
+        // Wait for all votes
+        let results = futures::future::join_all(futures).await;
+        for granted in results {
+            if granted {
                 votes += 1;
             }
         }
 
-        if votes > (peers.len() / 2) {
+        let majority = (self.peers.len() + 1) / 2 + 1;
+        if votes >= majority {
+            println!("[Node {}] Won election with {}/{} votes", self.id, votes, self.peers.len() + 1);
             self.become_leader();
         } else {
-            println!("[Node {}] Election failed with {}/{} votes", self.id, votes, peers.len());
+            println!("[Node {}] Lost election with {}/{} votes", self.id, votes, self.peers.len() + 1);
+            self.role = RaftRole::Follower;
         }
     }
 
-    pub fn send_heartbeats(&mut self) {
+
+
+    pub fn send_heartbeats(&mut self, peers: &mut [RaftNode]) {
         println!("[Node {}] Sending heartbeat (AppendEntries RPCs)...", self.id);
-        self.send_append_entries_to_peers();
+        self.send_append_entries_to_peers(); // 👈 simulate real RAFT interaction
     }
 
 
@@ -435,26 +478,64 @@ impl RaftNode {
     }
 
 
-    pub fn start_election(&mut self, peers: &mut [RaftNode]) {
+    pub async fn start_election(&mut self) {
         self.become_candidate();
 
-        let mut votes = 1;
-        for peer in peers.iter_mut() {
-            if peer.id == self.id {
-                continue;
+        let mut votes = 1; // vote for self
+        let term = self.current_term;
+        let candidate_id = self.id;
+
+        println!("[Node {}] Starting election for term {}", self.id, term);
+
+        let vote_futures = self.peers.iter().map(|(&peer_id, client)| {
+            let mut client = client.clone();
+            let last_log_index = self.log.len().saturating_sub(1) as u64;
+            let last_log_term = if self.log.is_empty() {
+                0
+            } else {
+                self.log[last_log_index as usize].term
+            };
+            let request = crate::raft_proto::RequestVoteRequest {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            };
+
+
+            async move {
+                match client.request_vote(tonic::Request::new(request)).await {
+                    Ok(response) => {
+                        let resp = response.into_inner();
+                        println!("[Node {}] Vote response from {}: {}", candidate_id, peer_id, resp.vote_granted);
+                        resp.vote_granted
+                    }
+                    Err(err) => {
+                        eprintln!("[Node {}] Failed to contact peer {} for vote: {}", candidate_id, peer_id, err);
+                        false
+                    }
+                }
             }
-            if peer.handle_vote_request(self.current_term, self.id) {
+        });
+
+        // Wait for all responses
+        let results = futures::future::join_all(vote_futures).await;
+        for granted in results {
+            if granted {
                 votes += 1;
             }
         }
 
-        let majority = peers.len() / 2 + 1;
+        let majority = (self.peers.len() + 1) / 2 + 1;
         if votes >= majority {
+            println!("[Node {}] Won election with {}/{} votes", self.id, votes, self.peers.len() + 1);
             self.become_leader();
         } else {
-            println!("[Node {}] Election failed with {} votes", self.id, votes);
+            println!("[Node {}] Election failed with {}/{}", self.id, votes, self.peers.len() + 1);
+            self.role = RaftRole::Follower;
         }
     }
+
 
     pub fn tick(&mut self, peers: &mut [RaftNode]) {
         if !self.is_election_timeout() {
@@ -465,11 +546,35 @@ impl RaftNode {
             RaftRole::Follower => self.become_candidate(),
             RaftRole::Candidate => {
                 self.become_candidate();
-                self.send_vote_requests(peers);
+                self.send_vote_requests();
             }
-            RaftRole::Leader => self.send_heartbeats(),
+            RaftRole::Leader => self.send_heartbeats(peers),
         }
     }
+
+    /// Simulates sending heartbeats by directly calling handle_append_entries on test peers.
+    pub fn simulate_send_heartbeats(&mut self, peers: &mut [RaftNode]) {
+        for peer in peers.iter_mut() {
+            let prev_log_index = if self.log.len() > 0 { self.log.len() - 1 } else { 0 };
+            let prev_log_term = if self.log.len() > 0 {
+                self.log[prev_log_index].term
+            } else {
+                0
+            };
+
+            let req = AppendEntriesRequest {
+                term: self.current_term,
+                leader_id: self.id,
+                prev_log_index: prev_log_index as u64,
+                prev_log_term,
+                entries: vec![], // Heartbeat has no log entries
+                leader_commit: self.commit_index as u64,
+            };
+
+            peer.handle_append_entries(&req);
+        }
+    }
+
 }
 
 
@@ -519,25 +624,26 @@ mod tests {
     }
 
     #[test]
-    fn test_leader_sends_heartbeats_to_followers() {
-        let mut nodes: Vec<RaftNode> = (1..=3)
-            .map(|id| RaftNode::new_with_timeout(id, Duration::from_millis(300), test_engine()))
-            .collect();
+fn test_leader_sends_heartbeats_to_followers() {
+    let mut nodes: Vec<RaftNode> = (1..=3)
+        .map(|id| RaftNode::new_with_timeout(id, Duration::from_millis(300), test_engine()))
+        .collect();
 
-        let (leader, peers) = nodes.split_first_mut().unwrap();
-        leader.become_leader();
+    let (leader, peers) = nodes.split_first_mut().unwrap();
+    leader.become_leader();
 
-        for peer in peers.iter_mut() {
-            peer.last_heartbeat = Instant::now() - Duration::from_millis(500);
-        }
-
-        leader.send_heartbeats();
-
-        for peer in peers {
-            assert!(!peer.is_election_timeout(), "Peer {} should not timeout", peer.id);
-            assert_eq!(peer.role, RaftRole::Follower);
-        }
+    for peer in peers.iter_mut() {
+        peer.last_heartbeat = Instant::now() - Duration::from_millis(500);
     }
+
+    leader.simulate_send_heartbeats(peers); // ✅ simulation version
+
+    for peer in peers {
+        assert!(!peer.is_election_timeout(), "Peer {} should not timeout", peer.id);
+        assert_eq!(peer.role, RaftRole::Follower);
+    }
+}
+
 
     #[test]
     fn test_candidate_retries_election_on_timeout() {

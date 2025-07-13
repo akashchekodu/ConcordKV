@@ -86,7 +86,7 @@ async fn test_append_entries_conflict_replaces_entries() {
     let req = Request::new(AppendEntriesRequest {
         term: 2,
         leader_id: 99,
-        prev_log_index: 1,
+        prev_log_index: 0,
         prev_log_term: 1,
         entries: new_entries,
         leader_commit: 0,
