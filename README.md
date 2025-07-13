@@ -121,4 +121,4 @@ kvstore-rs/
 
 ## 📝 License
 
-MIT License © 2025 ConcordKV Team
+MIT License © 2025 
