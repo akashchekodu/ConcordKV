@@ -1,6 +1,7 @@
 // /src/lib.rs
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
+use std::collections::HashMap;
 
 // These constants pull in the compiled descriptor sets from OUT_DIR:
 const RAFT_DESCRIPTOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/raft_descriptor.bin"));
@@ -97,31 +98,41 @@ impl KvStore for KvStoreService {
 pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:50051".parse()?;
 
-        // Spin up your KV engine and Raft node:
+    // 🎯 Step 1: Define peer addresses (update this depending on the current node's ID!)
+    let peer_addrs = HashMap::from([
+        (1, "127.0.0.1:50051".to_string()),
+        (2, "127.0.0.1:50052".to_string()),
+        (3, "127.0.0.1:50053".to_string()),
+    ]);
+
+    let current_id = 1; // ⬅️ you’ll pass this per instance (e.g. CLI arg or env)
+    
+    // 🧠 Step 3: Set up KV engine and services
     let engine = Arc::new(KVEngine::new("wal.log", "sstables"));
-    let raft_node = Arc::new(Mutex::new(RaftNode::new_with_timeout(1, Duration::from_millis(300))));
+    
+    // ⚙️ Step 2: Initialize Raft node with peer connections
+    let raft_node = Arc::new(Mutex::new(
+        RaftNode::with_peers(current_id, &peer_addrs, Duration::from_millis(300), engine.clone()).await
+    ));
+
 
     let kv_service = KvStoreService { engine: Arc::clone(&engine) };
+    let raft_service = RaftGrpcServer::new(Arc::clone(&raft_node), Arc::clone(&engine));
 
-    // now this matches our updated constructor
-    let raft_service = RaftGrpcServer::new(
-        Arc::clone(&raft_node),
-        Arc::clone(&engine),
-    );
-
-
-    // Build the reflection service using the two descriptor blobs:
+    // 🧪 Step 4: Add reflection and gRPC server
     let reflection = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(RAFT_DESCRIPTOR)
         .register_encoded_file_descriptor_set(KVSTORE_DESCRIPTOR)
         .build()?;
 
     println!("Server listening on {}", addr);
+
     Server::builder()
-    .add_service(KvStoreServer::new(kv_service))
-    .add_service(raft_proto::raft_server::RaftServer::new(raft_service))
-    .add_service(reflection)
-    .serve(addr)
-    .await?;
+        .add_service(KvStoreServer::new(kv_service))
+        .add_service(raft_proto::raft_server::RaftServer::new(raft_service))
+        .add_service(reflection)
+        .serve(addr)
+        .await?;
+
     Ok(())
 }

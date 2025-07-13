@@ -22,7 +22,12 @@ fn make_entry(term: u64, cmd: AppCommand) -> LogEntry {
 
 #[tokio::test]
 async fn test_append_entries_appends_new_entries() {
-    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(1, Duration::from_millis(300))));
+    let engine = Arc::new(KVEngine::new("test-wal", "test-sst")); // ✅ New
+    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(
+        1,
+        Duration::from_millis(300),
+        Arc::clone(&engine), // ✅ Pass engine here
+    )));
     assert_eq!(node.lock().unwrap().log.len(), 0);
 
     let entries = vec![
@@ -39,9 +44,7 @@ async fn test_append_entries_appends_new_entries() {
         leader_commit: 0,
     });
 
-    let engine = Arc::new(KVEngine::new("test-wal", "test-sst"));
-    let server = RaftGrpcServer::new(Arc::clone(&node), engine);
-
+    let server = RaftGrpcServer::new(Arc::clone(&node), Arc::clone(&engine));
     let resp = server.append_entries(req).await.unwrap().into_inner();
     assert!(resp.success);
 
@@ -57,7 +60,12 @@ async fn test_append_entries_appends_new_entries() {
 
 #[tokio::test]
 async fn test_append_entries_conflict_replaces_entries() {
-    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(1, Duration::from_millis(300))));
+    let engine = Arc::new(KVEngine::new("test-wal", "test-sst")); // ✅ New
+    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(
+        1,
+        Duration::from_millis(300),
+        Arc::clone(&engine), // ✅ Pass engine here
+    )));
     {
         let mut n = node.lock().unwrap();
         n.log.push(LogEntryWithCommand {
@@ -84,9 +92,7 @@ async fn test_append_entries_conflict_replaces_entries() {
         leader_commit: 0,
     });
 
-    let engine = Arc::new(KVEngine::new("test-wal", "test-sst"));
-    let server = RaftGrpcServer::new(Arc::clone(&node), engine);
-
+    let server = RaftGrpcServer::new(Arc::clone(&node), Arc::clone(&engine));
     let resp = server.append_entries(req).await.unwrap().into_inner();
     assert!(resp.success);
 

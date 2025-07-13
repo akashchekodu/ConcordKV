@@ -9,7 +9,6 @@ use crate::storage::KVEngine;
 use tonic::Request;
 use crate::raft_proto::raft_server::Raft;
 
-
 /// Helper to create a log entry with serialized command
 fn make_entry(term: u64, cmd: Command) -> LogEntry {
     LogEntry {
@@ -20,9 +19,13 @@ fn make_entry(term: u64, cmd: Command) -> LogEntry {
 
 #[tokio::test]
 async fn test_append_entries_appends_new_entries() {
-    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(1, Duration::from_millis(300))));
+    let engine = Arc::new(KVEngine::new("test-wal", "test-sst"));
+    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(
+        1,
+        Duration::from_millis(300),
+        Arc::clone(&engine),
+    )));
 
-    // Insert dummy entry at index 0 to match prev_log_index = 0
     {
         let mut n = node.lock().unwrap();
         n.log.push(LogEntryWithCommand {
@@ -45,25 +48,29 @@ async fn test_append_entries_appends_new_entries() {
         leader_commit: 0,
     });
 
-    let engine = Arc::new(KVEngine::new("test-wal", "test-sst"));
-    let server = RaftGrpcServer::new(Arc::clone(&node), engine);
-
+    let server = RaftGrpcServer::new(Arc::clone(&node), Arc::clone(&engine));
     let resp = server.append_entries(req).await.unwrap().into_inner();
+
     assert!(resp.success);
 
     let log = &node.lock().unwrap().log;
-    assert_eq!(log.len(), 3); // now 1 dummy + 2 new entries
+    assert_eq!(log.len(), 3);
     assert_eq!(log[1].term, 1);
     assert_eq!(log[2].term, 1);
 
-    // Clean up
     let _ = std::fs::remove_file("test-wal");
     let _ = std::fs::remove_dir_all("test-sst");
 }
 
 #[tokio::test]
 async fn test_append_entries_conflict_replaces_entries() {
-    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(1, Duration::from_millis(300))));
+    let engine = Arc::new(KVEngine::new("test-wal", "test-sst"));
+    let node = Arc::new(Mutex::new(RaftNode::new_with_timeout(
+        1,
+        Duration::from_millis(300),
+        Arc::clone(&engine),
+    )));
+
     {
         let mut n = node.lock().unwrap();
         n.log.push(LogEntryWithCommand {
@@ -90,10 +97,9 @@ async fn test_append_entries_conflict_replaces_entries() {
         leader_commit: 0,
     });
 
-    let engine = Arc::new(KVEngine::new("test-wal", "test-sst"));
-    let server = RaftGrpcServer::new(Arc::clone(&node), engine);
-
+    let server = RaftGrpcServer::new(Arc::clone(&node), Arc::clone(&engine));
     let resp = server.append_entries(req).await.unwrap().into_inner();
+
     assert!(resp.success);
 
     let n = node.lock().unwrap();
@@ -108,7 +114,6 @@ async fn test_append_entries_conflict_replaces_entries() {
         panic!("Expected Put command at index 1");
     }
 
-    // Clean up
     let _ = std::fs::remove_file("test-wal");
     let _ = std::fs::remove_dir_all("test-sst");
 }
