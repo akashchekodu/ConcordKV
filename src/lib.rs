@@ -2,6 +2,7 @@
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
 use std::collections::HashMap;
+use crate::raft::node::start_raft_main_loop;
 
 // These constants pull in the compiled descriptor sets from OUT_DIR:
 const RAFT_DESCRIPTOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/raft_descriptor.bin"));
@@ -98,28 +99,28 @@ impl KvStore for KvStoreService {
 pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:50051".parse()?;
 
-    // 🎯 Step 1: Define peer addresses (update this depending on the current node's ID!)
     let peer_addrs = HashMap::from([
         (1, "127.0.0.1:50051".to_string()),
         (2, "127.0.0.1:50052".to_string()),
         (3, "127.0.0.1:50053".to_string()),
     ]);
 
-    let current_id = 1; // ⬅️ you’ll pass this per instance (e.g. CLI arg or env)
-    
-    // 🧠 Step 3: Set up KV engine and services
+    let current_id = 1; // Ideally passed in via CLI/env/config
+
     let engine = Arc::new(KVEngine::new("wal.log", "sstables"));
-    
-    // ⚙️ Step 2: Initialize Raft node with peer connections
+
     let raft_node = Arc::new(Mutex::new(
-        RaftNode::with_peers(current_id, &peer_addrs, Duration::from_millis(300), engine.clone()).await
+        RaftNode::with_peers(current_id, &peer_addrs, Duration::from_millis(300), engine.clone()).await,
     ));
 
+    // ✅ Spawn the ticking Raft loop
+    tokio::spawn(start_raft_main_loop(Arc::clone(&raft_node)));
 
-    let kv_service = KvStoreService { engine: Arc::clone(&engine) };
+    let kv_service = KvStoreService {
+        engine: Arc::clone(&engine),
+    };
     let raft_service = RaftGrpcServer::new(Arc::clone(&raft_node), Arc::clone(&engine));
 
-    // 🧪 Step 4: Add reflection and gRPC server
     let reflection = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(RAFT_DESCRIPTOR)
         .register_encoded_file_descriptor_set(KVSTORE_DESCRIPTOR)

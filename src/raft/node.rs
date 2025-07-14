@@ -490,7 +490,7 @@ impl RaftNode {
 
     pub fn check_election_timeout_and_maybe_restart_election(&mut self) {
         if self.is_election_timeout() {
-            println!("[Node {}] Election timeout (as candidate). Restarting election...");
+            println!("[Node {}] Election timeout (as candidate). Restarting election...",self.id);
             self.start_election();
         }
     }
@@ -554,20 +554,25 @@ impl RaftNode {
     }
 
 
-    pub fn tick(&mut self, peers: &mut [RaftNode]) {
+    pub fn tick(&mut self) {
         if !self.is_election_timeout() {
             return;
         }
 
         match self.role {
-            RaftRole::Follower => self.become_candidate(),
+            RaftRole::Follower => {
+                self.become_candidate();
+            }
             RaftRole::Candidate => {
                 self.become_candidate();
-                self.send_vote_requests();
+                // 🚨 Do NOT call send_vote_requests() here — it must happen in async context
             }
-            RaftRole::Leader => self.send_heartbeats(peers),
+            RaftRole::Leader => {
+                // 🚨 Do NOT send heartbeats here — also handled in async context
+            }
         }
     }
+
 
     /// Simulates sending heartbeats by directly calling handle_append_entries on test peers.
     pub fn simulate_send_heartbeats(&mut self, peers: &mut [RaftNode]) {
@@ -602,21 +607,22 @@ pub async fn start_raft_main_loop(node: Arc<Mutex<RaftNode>>) {
         ticker.tick().await;
 
         let mut node = node.lock().unwrap();
-        node.tick(&mut peers);
+        node.tick(); // this only changes state
 
         match node.role {
             RaftRole::Leader => {
-                node.send_append_entries_to_peers();
+                node.send_append_entries_to_peers(); // gRPC heartbeats
             }
             RaftRole::Candidate => {
-                node.check_election_timeout_and_maybe_restart_election();
+                node.send_vote_requests(); // gRPC vote requests
             }
             RaftRole::Follower => {
-                node.check_election_timeout_and_maybe_become_candidate();
+                // do nothing
             }
         }
     }
 }
+
 
 
 
@@ -650,7 +656,7 @@ mod tests {
         std::thread::sleep(StdDuration::from_millis(200));
 
         let (first, rest) = nodes.split_at_mut(1);
-        first[0].tick(rest);
+        first[0].tick();
         assert_eq!(first[0].role, RaftRole::Candidate);
     }
 
@@ -661,7 +667,7 @@ mod tests {
             .collect();
 
         let (self_node, peers) = nodes.split_first_mut().unwrap();
-        self_node.start_election(peers);
+        self_node.start_election();
         assert_eq!(self_node.role, RaftRole::Leader);
     }
 
@@ -703,8 +709,8 @@ fn test_leader_sends_heartbeats_to_followers() {
             peer.voted_for = Some(999);
         }
 
-        std::thread::sleep(Duration::from_millis(250));
-        node.tick(peers);
+        std::thread::sleep(StdDuration::from_millis(250));
+        node.tick();
 
         assert_eq!(node.role, RaftRole::Leader);
         assert_eq!(node.voted_for, Some(node.id));
